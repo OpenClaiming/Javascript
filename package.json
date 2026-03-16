@@ -1,0 +1,7 @@
+{
+  "name": "openclaiming",
+  "version": "0.1.0",
+  "description": "OpenClaiming reference implementation for JavaScript",
+  "main": "index.js",
+  "license": "MIT"
+}
