@@ -1,7 +1,25 @@
 {
-  "name": "openclaiming",
-  "version": "0.1.0",
-  "description": "OpenClaiming reference implementation for JavaScript",
-  "main": "index.js",
-  "license": "MIT"
+	"name": "openclaiming",
+	"version": "0.1.0",
+	"description": "OpenClaiming reference implementation for JavaScript",
+	"type": "module",
+	"main": "index.js",
+	"exports": {
+		".": "./index.js"
+	},
+	"keywords": [
+		"openclaiming",
+		"crypto",
+		"signatures",
+		"json",
+		"verification",
+		"claims"
+	],
+	"optionalDependencies": {
+		"json-canonicalize": "^1.1.0"
+	},
+	"engines": {
+		"node": ">=16"
+	},
+	"license": "MIT"
 }

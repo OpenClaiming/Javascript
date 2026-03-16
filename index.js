@@ -1,31 +1,93 @@
-const crypto = require("crypto");
+// Optional strict canonicalizer:
+// npm install json-canonicalize
+// https://github.com/cyberphone/json-canonicalization
 
-class OpenClaim {
+import crypto from "crypto"
 
-	static canonicalize(obj) {
-		const clone = JSON.parse(JSON.stringify(obj));
-		delete clone.sig;
-		return JSON.stringify(clone, Object.keys(clone).sort());
-	}
+let strictCanonicalize = null
 
-	static sign(claim, privateKey) {
-		const canon = this.canonicalize(claim);
-		const sign = crypto.createSign("SHA256");
-		sign.update(canon);
-		const signature = sign.sign(privateKey, "base64");
-		claim.sig = signature;
-		return claim;
-	}
+try {
+  strictCanonicalize = require("json-canonicalize").canonicalize
+} catch {}
 
-	static verify(claim, publicKey) {
-		const sig = claim.sig;
-		if (!sig) return false;
-		const canon = this.canonicalize(claim);
-		const verify = crypto.createVerify("SHA256");
-		verify.update(canon);
-		return verify.verify(publicKey, sig, "base64");
-	}
+function normalize(v) {
 
+  if (Array.isArray(v)) {
+    return v.map(normalize)
+  }
+
+  if (v && typeof v === "object") {
+
+    const out = {}
+
+    for (const k of Object.keys(v).sort()) {
+      out[k] = normalize(v[k])
+    }
+
+    return out
+  }
+
+  if (typeof v === "number") {
+    return Number(v).toString()
+  }
+
+  return v
 }
 
-module.exports = OpenClaim;
+export class OpenClaim {
+
+  static canonicalize(claim) {
+
+    const obj = { ...claim }
+    delete obj.sig
+
+    if (strictCanonicalize) {
+      return strictCanonicalize(obj)
+    }
+
+    return JSON.stringify(normalize(obj))
+  }
+
+  static sign(claim, privateKeyPem) {
+
+    const canon = OpenClaim.canonicalize(claim)
+
+    const hash = crypto
+      .createHash("sha256")
+      .update(canon)
+      .digest()
+
+    const signer = crypto.createSign("SHA256")
+
+    signer.update(hash)
+    signer.end()
+
+    const sig = signer
+      .sign(privateKeyPem)
+      .toString("base64")
+
+    return { ...claim, sig }
+  }
+
+  static verify(claim, publicKeyPem) {
+
+    if (!claim.sig) return false
+
+    const canon = OpenClaim.canonicalize(claim)
+
+    const hash = crypto
+      .createHash("sha256")
+      .update(canon)
+      .digest()
+
+    const verifier = crypto.createVerify("SHA256")
+
+    verifier.update(hash)
+    verifier.end()
+
+    return verifier.verify(
+      publicKeyPem,
+      Buffer.from(claim.sig, "base64")
+    )
+  }
+}
