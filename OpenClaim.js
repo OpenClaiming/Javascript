@@ -367,7 +367,26 @@ export class OpenClaim {
       const keyObj = await resolveKeyString(keys[i])
       if (!keyObj) continue
 
-      if (keyObj.typ !== "ES256") continue
+	  if (keyObj.typ === "ES256") {
+	  	const pub = getCachedPublicKey(keyObj.value)
+	  	if (!pub) continue
+
+	  	const verifier = crypto.createVerify("SHA256")
+	  	verifier.update(hash)
+	  	verifier.end()
+
+	  	if (verifier.verify(pub, Buffer.from(sig, "base64"))) {
+	  		valid++
+	  		continue
+	  	}
+	  }
+
+	  if (keyObj.typ === "EIP712") {
+	  	if (OpenClaim.EVM && OpenClaim.EVM.verifyKey(claim, keyObj, sig)) {
+	  		valid++
+	  		continue
+	  	}
+	  }
 
       const pub = getCachedPublicKey(keyObj.value)
       if (!pub) continue
