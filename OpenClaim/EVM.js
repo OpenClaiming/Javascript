@@ -143,7 +143,7 @@
 			["bytes32", "bytes32", "bytes32"],
 			[
 				AUTHORIZATION_CONTEXT_TYPEHASH,
-				keccak256Utf8(context.typ || ""),
+				keccak256Utf8(context.fmt || ""),
 				keccak256Utf8(context.value || "")
 			]
 		)
@@ -156,7 +156,7 @@
 		return hashBytes32Array(hashes)
 	}
 
-	function detectType(claim) {
+	function detectExtension(claim) {
 		const payer = readAddress(claim, "payer")
 		const token = readAddress(claim, "token")
 		const line = readField(claim, "line", null)
@@ -216,7 +216,7 @@
 	EVM.hashConstraints = hashConstraints
 	EVM.hashContext = hashContext
 	EVM.hashContexts = hashContexts
-	EVM.detectType = detectType
+	EVM.detectExtension = detectExtension
 
 	EVM.toPaymentPayload = function (claim) {
 		requireObject(claim, "claim")
@@ -301,16 +301,16 @@
 	}
 
 	EVM.toPayload = function (claim) {
-		const typ = detectType(claim)
+		const ext = detectExtension(claim)
 
-		if (typ === "payment") {
+		if (ext === "payment") {
 			return EVM.toPaymentPayload(claim)
 		}
-		if (typ === "authorization") {
+		if (ext === "authorization") {
 			return EVM.toAuthorizationPayload(claim)
 		}
 
-		throw new Error("Unable to detect EIP712 claim type")
+		throw new Error("Unable to detect EIP712 claim extension")
 	}
 
 	EVM.signPayment = async function (claim, signer) {
@@ -334,12 +334,12 @@
 	}
 
 	EVM.sign = async function (claim, signer) {
-		const typ = detectType(claim)
+		const ext = detectExtension(claim)
 
-		if (typ === "payment") {
+		if (ext === "payment") {
 			return await EVM.signPayment(claim, signer)
 		}
-		if (typ === "authorization") {
+		if (ext === "authorization") {
 			return await EVM.signAuthorization(claim, signer)
 		}
 
@@ -375,12 +375,12 @@
 	}
 
 	EVM.verify = function (claim, signature, expectedAddress) {
-		const typ = detectType(claim)
+		const ext = detectExtension(claim)
 
-		if (typ === "payment") {
+		if (ext === "payment") {
 			return EVM.verifyPayment(claim, signature, expectedAddress)
 		}
-		if (typ === "authorization") {
+		if (ext === "authorization") {
 			return EVM.verifyAuthorization(claim, signature, expectedAddress)
 		}
 
@@ -388,7 +388,7 @@
 	}
 
 	EVM.verifyKey = function (claim, keyObj, signature) {
-		if (!keyObj || keyObj.typ !== "EIP712") return false
+		if (!keyObj || keyObj.fmt !== "EIP712") return false
 		return EVM.verify(claim, signature, keyObj.value)
 	}
 

@@ -10,6 +10,12 @@ try {
   strictCanonicalize = require("json-canonicalize").canonicalize
 } catch {}
 
+// ---------- ENV DETECTION ----------
+
+const isNode = typeof process !== "undefined" && process.versions?.node
+const subtle = (typeof crypto !== "undefined" && crypto.webcrypto?.subtle)
+  || (typeof window !== "undefined" && window.crypto?.subtle)
+
 // ---------- CACHE ----------
 
 const CACHE_TTL = 60_000 // 60 seconds
@@ -81,7 +87,7 @@ function normalizeSignatures(v) {
 function ensureStringKeys(keys) {
   for (const k of keys) {
     if (typeof k !== "string") {
-      throw new Error("all keys must be strings")
+      throw new Error("OpenClaim: all keys must be strings")
     }
   }
 }
@@ -91,7 +97,7 @@ function ensureUniqueKeys(keys) {
 
   for (const k of keys) {
     if (seen.has(k)) {
-      throw new Error("duplicate keys are not allowed")
+      throw new Error("OpenClaim: duplicate keys are not allowed")
     }
     seen.add(k)
   }
@@ -102,12 +108,15 @@ function ensureSortedKeys(keys) {
 
   for (let i = 0; i < keys.length; i++) {
     if (keys[i] !== sorted[i]) {
-      throw new Error("key array must be lexicographically sorted")
+      throw new Error("OpenClaim: key array must be lexicographically sorted")
     }
   }
 }
 
 function derivePublicKeyPem(privateKeyPem) {
+  if (!isNode) {
+    throw new Error("OpenClaim: derivePublicKeyPem requires Node")
+  }
   return crypto
     .createPublicKey(privateKeyPem)
     .export({ type: "spki", format: "pem" })
@@ -140,96 +149,95 @@ function isPemPublicKey(v) {
 }
 
 function toEs256KeyStringFromPublicPem(publicKeyPem) {
-  return "es256:" + pemToDer(publicKeyPem)
+  return "data:key/es256;base64," + pemToDer(publicKeyPem)
 }
+
+// ---------- HASH ----------
 
 function sha256(bufOrString) {
-  return crypto
-    .createHash("sha256")
-    .update(bufOrString)
-    .digest()
+
+  if (isNode) {
+    return Promise.resolve(
+      crypto.createHash("sha256").update(bufOrString).digest()
+    )
+  }
+
+  return subtle.digest("SHA-256",
+    typeof bufOrString === "string"
+      ? new TextEncoder().encode(bufOrString)
+      : bufOrString
+  ).then(buf => new Uint8Array(buf))
 }
 
-// ---------- CACHED FETCH ----------
+// ---------- CRYPTO ----------
 
-async function fetchJson(url) {
+function signAsync(privateKeyPem, hash) {
 
-  const cached = getCache(urlCache, url)
-  if (cached !== null) return cached
-
-  try {
-    const res = await fetch(url)
-
-    if (!res.ok) return null
-
-    const json = await res.json()
-
-    setCache(urlCache, url, json)
-
-    return json
-
-  } catch {
-    return null
+  if (isNode) {
+    return Promise.resolve(
+      crypto.sign(null, hash, privateKeyPem)
+    )
   }
+
+  return importPrivateKey(privateKeyPem).then(key =>
+    subtle.sign(
+      { name: "ECDSA", hash: "SHA-256" },
+      key,
+      hash
+    )
+  ).then(sig => new Uint8Array(sig))
 }
 
-// ---------- CACHED RESOLVE ----------
+function verifyAsync(publicKeyPem, sig, hash) {
 
-async function resolveKeyString(keyStr) {
-
-  const cached = getCache(keyCache, keyStr)
-  if (cached !== null) return cached
-
-  if (!keyStr || typeof keyStr !== "string") {
-    return null
+  if (isNode) {
+    return Promise.resolve(
+      crypto.verify(null, hash, publicKeyPem, sig)
+    )
   }
 
-  const idx = keyStr.indexOf(":")
-  if (idx <= 0) {
-    return null
-  }
-
-  const scheme = keyStr.slice(0, idx).toLowerCase()
-  const rest = keyStr.slice(idx + 1)
-
-  if (scheme !== "es256" && scheme !== "eip712") {
-    return null
-  }
-
-  let result = null
-
-  if (rest.startsWith("http://") || rest.startsWith("https://")) {
-
-    const [url, ...path] = rest.split("#")
-    const json = await fetchJson(url)
-
-    if (!json) return null
-
-    let current = json
-
-    for (const p of path) {
-      if (!p) continue
-      current = current?.[p]
-    }
-
-    if (typeof current !== "string") {
-      return null
-    }
-
-    result = { typ: scheme.toUpperCase(), value: current }
-
-  } else {
-    result = { typ: scheme.toUpperCase(), value: rest }
-  }
-
-  if (result) {
-    setCache(keyCache, keyStr, result)
-  }
-
-  return result
+  return importPublicKey(publicKeyPem).then(key =>
+    subtle.verify(
+      { name: "ECDSA", hash: "SHA-256" },
+      key,
+      sig,
+      hash
+    )
+  )
 }
 
-// ---------- KEY PARSE CACHE ----------
+// ---------- WEBCRYPTO IMPORT ----------
+
+function importPublicKey(pem) {
+  const der = base64ToArrayBuffer(pemToDer(pem))
+  return subtle.importKey("spki", der,
+    { name: "ECDSA", namedCurve: "P-256" },
+    false,
+    ["verify"]
+  )
+}
+
+function importPrivateKey(pem) {
+  const der = base64ToArrayBuffer(
+    pem.replace(/-----.*PRIVATE KEY-----/g, "").replace(/\s+/g, "")
+  )
+  return subtle.importKey("pkcs8", der,
+    { name: "ECDSA", namedCurve: "P-256" },
+    false,
+    ["sign"]
+  )
+}
+
+function base64ToArrayBuffer(b64) {
+  const bin = atob(b64)
+  const bytes = new Uint8Array(bin.length)
+  for (let i = 0; i < bin.length; i++) {
+    bytes[i] = bin.charCodeAt(i)
+  }
+  return bytes.buffer
+}
+
+// ---------- PUBLIC KEY CACHE ----------
 
 function getCachedPublicKey(base64Der) {
 
@@ -243,6 +251,123 @@ function getCachedPublicKey(base64Der) {
   return pem
 }
 
+// ---------- DATA KEY PARSER ----------
+
+function parseDataKey(keyStr) {
+
+  if (!keyStr.startsWith("data:key/")) return null
+
+  const idx = keyStr.indexOf(",")
+  if (idx < 0) return null
+
+  const meta = keyStr.slice(5, idx)
+  const data = keyStr.slice(idx + 1)
+
+  const [typePart, ...params] = meta.split(";")
+  const type = typePart.replace("key/", "").toUpperCase()
+
+  let encoding = "raw"
+
+  for (const p of params) {
+    if (p === "base64") encoding = "base64"
+    if (p === "base64url") encoding = "base64url"
+  }
+
+  let value = data
+
+  if (encoding === "base64") {
+    value = Buffer.from(data, "base64")
+  }
+
+  if (encoding === "base64url") {
+    const pad = data.length % 4
+    const b64 = data.replace(/-/g, "+").replace(/_/g, "/") +
+      (pad ? "=".repeat(4 - pad) : "")
+    value = Buffer.from(b64, "base64")
+  }
+
+  return { fmt: type, value }
+}
+
+// ---------- FETCH ----------
+
+function fetchJson(url) {
+
+  const cached = getCache(urlCache, url)
+  if (cached !== null) return Promise.resolve(cached)
+
+  return fetch(url)
+    .then(r => r.ok ? r.json() : null)
+    .catch(() => null)
+    .then(json => {
+      setCache(urlCache, url, json)
+      return json
+    })
+}
+
+// ---------- KEY RESOLUTION ----------
+
+function resolveKeyString(keyStr, seen = new Set()) {
+
+  if (seen.has(keyStr)) {
+    return Promise.reject(
+      new Error("OpenClaim: cyclic key reference detected")
+    )
+  }
+
+  const cached = getCache(keyCache, keyStr)
+  if (cached !== null) return Promise.resolve(cached)
+
+  const nextSeen = new Set(seen)
+  nextSeen.add(keyStr)
+
+  if (keyStr.startsWith("data:key/")) {
+    const parsed = parseDataKey(keyStr)
+    if (parsed) {
+      setCache(keyCache, keyStr, parsed)
+      return Promise.resolve(parsed)
+    }
+  }
+
+  if (keyStr.startsWith("http")) {
+    const [url, ...path] = keyStr.split("#")
+
+    return fetchJson(url).then(json => {
+
+      if (!json) return null
+
+      let current = json
+
+      path.forEach(p => {
+        if (p) current = current?.[p]
+      })
+
+      if (Array.isArray(current)) return current
+
+      if (typeof current === "string") {
+        return resolveKeyString(current, nextSeen)
+      }
+
+      return null
+    }).then(res => {
+      setCache(keyCache, keyStr, res)
+      return res
+    })
+  }
+
+  const idx = keyStr.indexOf(":")
+  if (idx > 0) {
+    const result = {
+      fmt: keyStr.slice(0, idx).toUpperCase(),
+      value: keyStr.slice(idx + 1)
+    }
+    setCache(keyCache, keyStr, result)
+    return Promise.resolve(result)
+  }
+
+  return Promise.resolve(null)
+}
+
 // ---------- EXISTING ----------
 
 function buildSortedKeyState(keysInput, signaturesInput) {
@@ -253,7 +378,7 @@ function buildSortedKeyState(keysInput, signaturesInput) {
   ensureUniqueKeys(keys)
 
   if (signatures.length > keys.length) {
-    throw new Error("signature array cannot be longer than key array")
+    throw new Error("OpenClaim: signature array cannot be longer than key array")
   }
 
   const pairs = keys.map((key, i) => ({
@@ -282,6 +407,8 @@ function parseVerifyPolicy(policy, totalKeys) {
   return { minValid: 1 }
 }
 
+// ---------- MAIN ----------
+
 export class OpenClaim {
 
   static canonicalize(claim) {
@@ -296,110 +423,90 @@ export class OpenClaim {
     const signerPublicKeyPem = derivePublicKeyPem(privateKeyPem)
     const signerKey = toEs256KeyStringFromPublicPem(signerPublicKeyPem)
 
-    let keys = existing.keys ?? claim.key
-    let signatures = existing.signatures ?? claim.sig
+    let keys = toArray(existing.keys ?? claim.key)
+    let sigs = normalizeSignatures(existing.signatures ?? claim.sig)
 
-    keys = toArray(keys)
-    signatures = normalizeSignatures(signatures)
+    if (!keys.length) keys = [signerKey]
+    else if (!keys.includes(signerKey)) keys.push(signerKey)
 
-    if (!keys.length) {
-      keys = [signerKey]
-    } else if (!keys.includes(signerKey)) {
-      keys = [...keys, signerKey]
-    }
+    const state = buildSortedKeyState(keys, sigs)
 
-    let state = buildSortedKeyState(keys, signatures)
-
-    const signerIndex = state.keys.indexOf(signerKey)
-
-    const canon = OpenClaim.canonicalize({
-      ...claim,
-      key: state.keys,
-      sig: state.signatures
-    })
-
-    const hash = sha256(canon)
-
-    const signer = crypto.createSign("SHA256")
-    signer.update(hash)
-    signer.end()
-
-    state.signatures[signerIndex] =
-      signer.sign(privateKeyPem).toString("base64")
-
-    return {
+    const tmp = {
       ...claim,
       key: state.keys,
       sig: state.signatures
     }
+
+    const canon = OpenClaim.canonicalize(tmp)
+
+    return sha256(canon)
+      .then(hash => signAsync(privateKeyPem, hash))
+      .then(sig => {
+
+        const i = state.keys.indexOf(signerKey)
+        state.signatures[i] = Buffer.from(sig).toString("base64")
+
+        return {
+          ...claim,
+          key: state.keys,
+          sig: state.signatures
+        }
+      })
   }
 
-  static async verify(claim, publicKeyPem, policy = {}) {
+  static verify(claim, policy = {}) {
 
     let keys = toArray(claim.key)
-    let signatures = normalizeSignatures(claim.sig)
+    let sigs = normalizeSignatures(claim.sig)
 
-    if (!signatures.length) return false
-
-    if (!keys.length && publicKeyPem) {
-      keys = [toEs256KeyStringFromPublicPem(publicKeyPem)]
+    if (!keys.length) {
+      return Promise.reject(
+        new Error("OpenClaim: missing public keys")
+      )
     }
 
-    const state = buildSortedKeyState(keys, signatures)
-    keys = state.keys
-    signatures = state.signatures
+    const state = buildSortedKeyState(keys, sigs)
 
-    const canon = OpenClaim.canonicalize({
+    const tmp = {
       ...claim,
-      key: keys,
-      sig: signatures
-    })
-
-    const hash = sha256(canon)
-
-    let valid = 0
-
-    for (let i = 0; i < keys.length; i++) {
-
-      const sig = signatures[i]
-      if (!sig) continue
-
-      const keyObj = await resolveKeyString(keys[i])
-      if (!keyObj) continue
-
-	  if (keyObj.typ === "ES256") {
-	  	const pub = getCachedPublicKey(keyObj.value)
-	  	if (!pub) continue
-
-	  	const verifier = crypto.createVerify("SHA256")
-	  	verifier.update(hash)
-	  	verifier.end()
-
-	  	if (verifier.verify(pub, Buffer.from(sig, "base64"))) {
-	  		valid++
-	  		continue
-	  	}
-	  }
-
-	  if (keyObj.typ === "EIP712") {
-	  	if (OpenClaim.EVM && OpenClaim.EVM.verifyKey(claim, keyObj, sig)) {
-	  		valid++
-	  		continue
-	  	}
-	  }
-
-      const pub = getCachedPublicKey(keyObj.value)
-      if (!pub) continue
-
-      const verifier = crypto.createVerify("SHA256")
-      verifier.update(hash)
-      verifier.end()
-
-      if (verifier.verify(pub, Buffer.from(sig, "base64"))) {
-        valid++
-      }
+      key: state.keys,
+      sig: state.signatures
     }
 
-    return valid >= parseVerifyPolicy(policy, keys.length).minValid
+    const canon = OpenClaim.canonicalize(tmp)
+
+    return sha256(canon).then(hash => {
+
+      let valid = 0
+
+      return Promise.all(state.keys.map((k, i) => {
+
+        const sig = state.signatures[i]
+        if (!sig) return Promise.resolve(false)
+
+        return resolveKeyString(k).then(keyObj => {
+
+          const keyObjs = Array.isArray(keyObj) ? keyObj : [keyObj]
+
+          return Promise.all(keyObjs.map(ko => {
+
+            if (!ko || ko.fmt !== "ES256") return false
+
+            const der = Buffer.isBuffer(ko.value)
+              ? ko.value.toString("base64")
+              : String(ko.value)
+
+            const pub = getCachedPublicKey(der)
+
+            return verifyAsync(pub, Buffer.from(sig, "base64"), hash)
+
+          })).then(results => {
+            if (results.some(Boolean)) valid++
+          })
+        })
+      })).then(() =>
+        valid >= parseVerifyPolicy(policy, state.keys.length).minValid
+      )
+    })
   }
 }
